@@ -1,6 +1,6 @@
 {
-  "short_name": "@papercups-io/chat-widget",
-  "name": "@papercups-io/chat-widget",
+  "short_name": "ai-light-widget",
+  "name": "ai-light-widget",
   "icons": [
     {
       "src": "favicon.ico",

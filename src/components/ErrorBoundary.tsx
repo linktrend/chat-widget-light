@@ -13,7 +13,7 @@ class ErrorBoundary extends React.Component<Props, State> {
 
   componentDidCatch(error: any, info: any) {
     // TODO: log to Sentry?
-    console.error('Error rendering Papercups chat:', error, info);
+    console.error('Error rendering AI Light widget:', error, info);
   }
 
   render() {

@@ -5,8 +5,9 @@ import {motion} from 'framer-motion';
 import {jsx} from 'theme-ui';
 
 import WidgetToggle from './WidgetToggle';
-import ChatWidgetContainer, {SharedProps} from './ChatWidgetContainer';
+import ChatWidgetContainer, {LightWidgetProps} from './ChatWidgetContainer';
 import ErrorBoundary from './ErrorBoundary';
+import ChatUI from './ChatUI';
 
 type ToggleButtonOptions = {
   isOpen: boolean;
@@ -26,6 +27,7 @@ type PositionConfig = {
 };
 
 const DEFAULT_X_OFFSET = 20;
+const NAMESPACE = 'ai-light';
 
 const normalizePositionConfig = (
   position?: 'left' | 'right' | PositionConfig
@@ -72,10 +74,7 @@ const getDefaultStyles = (
   }
 };
 
-type Props = SharedProps & {
-  defaultIsOpen?: boolean;
-  isOpenByDefault?: boolean;
-  persistOpenState?: boolean;
+type Props = LightWidgetProps & {
   hideToggleButton?: boolean;
   iconVariant?: 'outlined' | 'filled';
   position?: 'left' | 'right' | PositionConfig;
@@ -89,19 +88,18 @@ const ChatWidget = (props: Props) => {
       <ChatWidgetContainer {...props} canToggle>
         {(config) => {
           const {
-            sandbox,
             isLoaded,
-            isActive,
             isOpen,
-            isTransitioning,
-            customIconUrl,
-            iframeUrl,
-            query,
-            shouldDisplayNotifications,
-            setIframeRef,
-            onToggleOpen,
+            isSending,
+            messages,
+            error,
+            title,
+            subtitle,
+            primaryColor,
+            sendMessage,
+            toggle,
+            clearError,
           } = config;
-
           const {
             hideToggleButton,
             iconVariant,
@@ -109,52 +107,54 @@ const ChatWidget = (props: Props) => {
             position = 'right',
             styles = {},
           } = props;
+
           const positionConfig = normalizePositionConfig(position);
           const {
             chatContainer: chatContainerStyle = {},
             toggleContainer: toggleContainerStyle = {},
             toggleButton: toggleButtonStyle = {},
           } = getDefaultStyles(styles, positionConfig);
+          const hiddenStyle = {
+            pointerEvents: 'none',
+            height: 0,
+            minHeight: 0,
+          } as any;
 
           return (
             <React.Fragment>
-              <motion.iframe
-                ref={setIframeRef}
-                title='Papercups Chat Widget Container'
-                className='Papercups-chatWindowContainer'
-                sandbox={sandbox}
-                animate={isActive ? 'open' : 'closed'}
+              <motion.div
+                className={`${NAMESPACE}__chat-window-container`}
+                animate={isOpen ? 'open' : 'closed'}
                 initial='closed'
                 variants={{
                   closed: {opacity: 0, y: 4},
                   open: {opacity: 1, y: 0},
                 }}
                 transition={{duration: 0.2, ease: 'easeIn'}}
-                src={`${iframeUrl}?${query}`}
-                style={
-                  isActive
-                    ? chatContainerStyle
-                    : {
-                        pointerEvents: 'none',
-                        height: 0,
-                        minHeight: 0,
-                      }
-                }
+                style={(isOpen ? chatContainerStyle : hiddenStyle) as any}
                 sx={{
-                  border: 'none',
                   bg: 'background',
-                  variant:
-                    !isOpen && shouldDisplayNotifications
-                      ? 'styles.WidgetContainer.notifications'
-                      : 'styles.WidgetContainer',
+                  variant: 'styles.WidgetContainer',
+                  overflow: 'hidden',
+                  isolation: 'isolate',
                 }}
+                data-ai-light-root
               >
-                Loading...
-              </motion.iframe>
+                <ChatUI
+                  title={title}
+                  subtitle={subtitle}
+                  primaryColor={primaryColor}
+                  messages={messages}
+                  isSending={isSending}
+                  error={error}
+                  onSend={sendMessage}
+                  onClearError={clearError}
+                />
+              </motion.div>
 
               {isLoaded && !hideToggleButton && (
                 <motion.div
-                  className='Papercups-toggleButtonContainer'
+                  className={`${NAMESPACE}__toggle-container`}
                   initial={false}
                   style={toggleContainerStyle}
                   animate={isOpen ? 'open' : 'closed'}
@@ -166,17 +166,17 @@ const ChatWidget = (props: Props) => {
                   typeof renderToggleButton === 'function' ? (
                     renderToggleButton({
                       isOpen,
-                      onToggleOpen,
-                      isDisabled: isTransitioning,
+                      onToggleOpen: toggle,
+                      isDisabled: isSending,
                     })
                   ) : (
                     <WidgetToggle
                       style={toggleButtonStyle}
-                      isDisabled={isTransitioning}
+                      isDisabled={isSending}
                       isOpen={isOpen}
-                      customIconUrl={customIconUrl}
+                      customIconUrl={undefined}
                       iconVariant={iconVariant}
-                      toggle={onToggleOpen}
+                      toggle={toggle}
                     />
                   )}
                 </motion.div>

@@ -17,7 +17,7 @@ code {
     monospace;
 }
 
-.Papercups-chatWindowContainer {
+.ai-light__chat-window-container {
   border-radius: 4px;
   box-shadow: rgba(0, 0, 0, 0.16) 0px 5px 24px;
 }

@@ -15,3 +15,11 @@ declare module '*.svg' {
   export default svgUrl;
   export { svgComponent as ReactComponent }
 }
+
+// Shim missing theme-ui component types for older definitions
+declare module 'theme-ui' {
+  export const Button: any;
+  export const Image: any;
+  export const ThemeProvider: any;
+  export const jsx: any;
+}

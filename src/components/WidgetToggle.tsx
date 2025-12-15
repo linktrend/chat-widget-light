@@ -2,6 +2,8 @@ import React, {CSSProperties} from 'react';
 import {Button, Image} from 'theme-ui';
 import {motion} from 'framer-motion';
 
+const NAMESPACE = 'ai-light';
+
 const Path = (props: any) => (
   <motion.path
     fill='transparent'
@@ -150,7 +152,7 @@ export const WidgetToggle = ({
 }) => {
   return (
     <Button
-      className='Papercups-toggleButton'
+      className={`${NAMESPACE}__toggle-button`}
       variant='primary'
       p={0}
       style={style}
@@ -160,6 +162,8 @@ export const WidgetToggle = ({
       disabled={isDisabled}
       onClick={toggle}
       aria-label={`${isOpen ? 'Close' : 'Open'} chat widget`}
+      aria-pressed={!!isOpen}
+      aria-expanded={!!isOpen}
     >
       <ToggleIcon
         customIconUrl={customIconUrl}

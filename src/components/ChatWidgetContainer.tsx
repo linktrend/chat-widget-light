@@ -2,792 +2,492 @@
 
 import React from 'react';
 import {ThemeProvider, jsx} from 'theme-ui';
-import qs from 'query-string';
-import {
-  CustomerMetadata,
-  Message,
-  WidgetSettings,
-  fetchWidgetSettings,
-  updateWidgetSettingsMetadata,
-  isValidUuid,
-  getUserInfo,
-  setupCustomEventHandlers,
-  setupPostMessageHandlers,
-} from '@papercups-io/browser';
+import {z} from 'zod';
 
-import {WidgetConfig, noop} from '../utils';
 import getThemeConfig from '../theme';
 import store from '../storage';
 import Logger from '../logger';
+import {
+  ChatMessage,
+  defaultSubtitle,
+  defaultTitle,
+  generateId,
+  nowAsISOString,
+} from '../utils';
 
-const DEFAULT_IFRAME_URL = 'https://chat-widget.papercups.io';
+export const OPEN_EVENT = 'ai-light:open';
+export const CLOSE_EVENT = 'ai-light:close';
+export const TOGGLE_EVENT = 'ai-light:toggle';
+const MAX_MESSAGES = 200;
+const FALLBACK_REPLY = 'I am having trouble reaching the server right now.';
 
-export type SharedProps = {
-  token: string;
-  inbox?: string;
-  // TODO: deprecate, use `token` instead
-  accountId?: string;
+type EndpointHealth = 'unknown' | 'reachable' | 'unreachable';
+
+const lightWidgetPropsSchema = z.object({
+  tenantId: z.string().min(1, 'tenantId is required'),
+  aiEndpoint: z.string().min(1, 'aiEndpoint is required'),
+  title: z.string().optional(),
+  subtitle: z.string().optional(),
+  primaryColor: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  isOpenByDefault: z.boolean().optional(),
+  debug: z.boolean().optional(),
+});
+
+const formatIssues = (issues: z.ZodIssue[]) =>
+  issues
+    .map((issue) => `${issue.path.join('.') || 'prop'}: ${issue.message}`)
+    .join(' | ');
+
+const sliceMessages = (messages: ChatMessage[]) =>
+  Array.isArray(messages) ? messages.slice(-MAX_MESSAGES) : [];
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export type LightWidgetProps = {
+  tenantId: string;
+  aiEndpoint: string;
   title?: string;
   subtitle?: string;
   primaryColor?: string;
-  baseUrl?: string;
-  greeting?: string;
-  awayMessage?: string;
-  customer?: CustomerMetadata | null;
-  newMessagePlaceholder?: string;
-  emailInputPlaceholder?: string;
-  newMessagesNotificationText?: string;
-  agentAvailableText?: string;
-  agentUnavailableText?: string;
-  showAgentAvailability?: boolean;
-  iframeUrlOverride?: string;
-  requireEmailUpfront?: boolean;
-  hideOutsideWorkingHours?: boolean;
-  popUpInitialMessage?: boolean | number;
-  customIconUrl?: string;
-  disableAnalyticsTracking?: boolean;
-  debug?: boolean;
-  onChatLoaded?: ({
-    open,
-    close,
-    identify,
-  }: {
-    open: () => void;
-    close: () => void;
-    identify: (data: any) => void;
-  }) => void;
-  onChatOpened?: () => void;
-  onChatClosed?: () => void;
-  onMessageSent?: (message: Message) => void;
-  onMessageReceived?: (message: Message) => void;
-  // TODO: how should we name these?
-  setDefaultTitle?: (settings: WidgetSettings) => string | Promise<string>;
-  setDefaultSubtitle?: (settings: WidgetSettings) => string | Promise<string>;
-  setDefaultGreeting?: (settings: WidgetSettings) => string | Promise<string>;
-};
-
-type Props = SharedProps & {
-  defaultIsOpen?: boolean;
+  metadata?: Record<string, any>;
   isOpenByDefault?: boolean;
-  persistOpenState?: boolean;
-  canToggle?: boolean;
-  children: (data: any) => any;
+  debug?: boolean;
 };
 
-type State = {
+export type ContainerRenderProps = {
   isOpen: boolean;
   isLoaded: boolean;
-  query: string;
-  config: WidgetConfig;
-  shouldDisplayNotifications: boolean;
-  isTransitioning: boolean;
+  isSending: boolean;
+  messages: ChatMessage[];
+  error: string | null;
+  sessionId: string;
+  tenantId: string;
+  title: string;
+  subtitle: string;
+  primaryColor?: string;
+  metadata?: Record<string, any>;
+  open: () => void;
+  close: () => void;
+  toggle: () => void;
+  sendMessage: (text: string) => Promise<void>;
+  clearError: () => void;
 };
 
-class ChatWidgetContainer extends React.Component<Props, State> {
-  iframeRef: any;
-  storage: any;
-  subscriptions: Array<() => void> = [];
-  logger: Logger = new Logger();
+type Props = LightWidgetProps & {
+  canToggle: boolean;
+  children: (data: ContainerRenderProps) => React.ReactElement;
+};
 
-  EVENTS = [
-    'papercups:open',
-    'papercups:close',
-    'papercups:toggle',
-    'papercups:identify',
-    'papercups:customer:set',
-    'storytime:customer:set',
-  ];
-
-  constructor(props: Props) {
-    super(props);
-
-    const token = props.token || props.accountId;
-
-    if (!token) {
-      throw new Error('A `token` is required to run the Papercups chat!');
-    } else if (!isValidUuid(token)) {
-      console.error(
-        `The \`token\` must be a valid UUID. (Received invalid \`token\`: ${token})`
-      );
-      console.error(
-        `If you're missing a Papercups \`token\`, you can get one by signing up for a free account at https://app.papercups.io/register`
-      );
-      throw new Error(`Invalid \`token\`: ${token}`);
-    }
-
-    this.state = {
-      isOpen: false,
-      isLoaded: false,
-      query: '',
-      config: {} as WidgetConfig,
-      shouldDisplayNotifications: false,
-      isTransitioning: false,
-    };
-  }
-
-  async componentDidMount() {
-    const ts = +new Date();
-    const {
-      token,
-      inbox,
-      accountId,
-      primaryColor,
-      baseUrl,
-      awayMessage,
-      newMessagePlaceholder,
-      emailInputPlaceholder,
-      newMessagesNotificationText,
-      agentAvailableText,
-      agentUnavailableText,
-      showAgentAvailability,
-      requireEmailUpfront,
-      disableAnalyticsTracking,
-      canToggle,
-      customer = {},
-      debug = false,
-    } = this.props;
-
-    this.logger = new Logger(!!debug);
-    this.subscriptions = [
-      setupPostMessageHandlers(window, this.postMessageHandlers),
-      setupCustomEventHandlers(window, this.EVENTS, this.customEventHandlers),
-    ];
-
-    this.storage = store(window);
-    // TODO: use `subscription_plan` from settings.account to determine
-    // whether to display the Papercups branding or not in the chat window
-    const settings = await this.fetchWidgetSettings();
-    const metadata = {...getUserInfo(window), ...customer};
-    const config: WidgetConfig = {
-      baseUrl,
-      inbox,
-      token: token || accountId,
-      // TODO: deprecate
-      accountId: token || accountId,
-      title: await this.getDefaultTitle(settings),
-      subtitle: await this.getDefaultSubtitle(settings),
-      primaryColor: primaryColor || settings.color,
-      greeting: await this.getDefaultGreeting(settings),
-      awayMessage: awayMessage || settings.away_message,
-      newMessagePlaceholder:
-        newMessagePlaceholder || settings.new_message_placeholder,
-      emailInputPlaceholder:
-        emailInputPlaceholder || settings.email_input_placeholder,
-      newMessagesNotificationText:
-        newMessagesNotificationText || settings.new_messages_notification_text,
-      companyName: settings?.account?.company_name,
-      requireEmailUpfront:
-        requireEmailUpfront || settings.require_email_upfront ? 1 : 0,
-      showAgentAvailability:
-        showAgentAvailability || settings.show_agent_availability ? 1 : 0,
-      agentAvailableText: settings.agent_available_text || agentAvailableText,
-      agentUnavailableText:
-        settings.agent_unavailable_text || agentUnavailableText,
-      closeable: canToggle ? 1 : 0,
-      customerId: this.storage.getCustomerId(),
-      subscriptionPlan: settings?.account?.subscription_plan,
-      isOutsideWorkingHours: settings?.account?.is_outside_working_hours,
-      isBrandingHidden: settings?.is_branding_hidden,
-      metadata: JSON.stringify(metadata),
-      disableAnalyticsTracking: disableAnalyticsTracking ? 1 : 0,
-      debug: debug ? 1 : 0,
-      version: '1.3.1',
-      ts: ts.toString(),
-    };
-
-    const query = qs.stringify(config, {skipEmptyString: true, skipNull: true});
-
-    this.setState({config, query});
-
-    // Set some metadata on the widget to better understand usage
-    await this.updateWidgetSettingsMetadata();
-  }
-
-  componentWillUnmount() {
-    this.subscriptions.forEach((unsubscribe) => {
-      if (typeof unsubscribe === 'function') {
-        unsubscribe();
-      }
-    });
-  }
-
-  componentDidUpdate(prevProps: Props) {
-    // Don't do anything if the widget hasn't loaded yet
-    if (!this.state.isLoaded) {
-      return;
-    }
-
-    const {
-      token,
-      inbox,
-      accountId,
+const ChatWidgetContainer = ({
+  tenantId,
+  aiEndpoint,
+  title = defaultTitle,
+  subtitle = defaultSubtitle,
+  primaryColor = '#1890ff',
+  metadata = {},
+  isOpenByDefault = false,
+  debug = false,
+  canToggle,
+  children,
+}: Props) => {
+  const isBrowser = typeof window !== 'undefined';
+  const validation = React.useMemo(() => {
+    const result = lightWidgetPropsSchema.safeParse({
+      tenantId,
+      aiEndpoint,
       title,
       subtitle,
       primaryColor,
-      baseUrl,
-      greeting,
-      newMessagePlaceholder,
-      emailInputPlaceholder,
-      newMessagesNotificationText,
-      requireEmailUpfront,
-      showAgentAvailability,
-      agentAvailableText,
-      agentUnavailableText,
-      customer,
-    } = this.props;
-    const current = [
-      token,
-      inbox,
-      accountId,
-      title,
-      subtitle,
-      primaryColor,
-      baseUrl,
-      greeting,
-      newMessagePlaceholder,
-      emailInputPlaceholder,
-      newMessagesNotificationText,
-      requireEmailUpfront,
-      showAgentAvailability,
-      agentAvailableText,
-      agentUnavailableText,
-    ];
-    const prev = [
-      prevProps.token,
-      prevProps.inbox,
-      prevProps.accountId,
-      prevProps.title,
-      prevProps.subtitle,
-      prevProps.primaryColor,
-      prevProps.baseUrl,
-      prevProps.greeting,
-      prevProps.newMessagePlaceholder,
-      prevProps.emailInputPlaceholder,
-      prevProps.newMessagesNotificationText,
-      prevProps.requireEmailUpfront,
-      prevProps.showAgentAvailability,
-      prevProps.agentAvailableText,
-      prevProps.agentUnavailableText,
-    ];
-    const {customerId} = this.state.config;
-    const shouldUpdateConfig = current.some((value, idx) => {
-      return value !== prev[idx];
-    });
-
-    // Send updates to iframe if props change. (This is mainly for use in
-    // the demo and "Getting Started" page, where users can play around with
-    // customizing the chat widget to suit their needs)
-    if (shouldUpdateConfig) {
-      this.handleConfigUpdated({
-        token,
-        inbox,
-        accountId,
-        title,
-        subtitle,
-        primaryColor,
-        baseUrl,
-        greeting,
-        newMessagePlaceholder,
-        emailInputPlaceholder,
-        newMessagesNotificationText,
-        agentAvailableText,
-        agentUnavailableText,
-        requireEmailUpfront: requireEmailUpfront ? 1 : 0,
-        showAgentAvailability: showAgentAvailability ? 1 : 0,
-      });
-    }
-
-    if (this.shouldUpdateCustomer(customer, prevProps.customer)) {
-      this.updateCustomerMetadata(customerId, customer);
-    }
-  }
-
-  shouldUpdateCustomer = (current: any, previous: any) => {
-    if (!current) {
-      return false;
-    } else if (current && !previous) {
-      return true;
-    }
-
-    const {metadata: x = {}, ...a} = current || {};
-    const {metadata: y = {}, ...b} = previous || {};
-
-    const hasMatchingInfo = Object.keys(a).every((key) => a[key] === b[key]);
-    const hasMatchingMetadata = Object.keys(x).every(
-      (key) => x[key] === y[key]
-    );
-
-    return !(hasMatchingInfo && hasMatchingMetadata);
-  };
-
-  getDefaultTitle = async (settings: WidgetSettings) => {
-    const {title, setDefaultTitle} = this.props;
-
-    if (setDefaultTitle && typeof setDefaultTitle === 'function') {
-      return setDefaultTitle(settings);
-    } else {
-      return title || settings.title;
-    }
-  };
-
-  getDefaultSubtitle = async (settings: WidgetSettings) => {
-    const {subtitle, setDefaultSubtitle} = this.props;
-
-    if (setDefaultSubtitle && typeof setDefaultSubtitle === 'function') {
-      return setDefaultSubtitle(settings);
-    } else {
-      return subtitle || settings.subtitle;
-    }
-  };
-
-  getDefaultGreeting = async (settings: WidgetSettings) => {
-    const {greeting, setDefaultGreeting} = this.props;
-
-    if (setDefaultGreeting && typeof setDefaultGreeting === 'function') {
-      return setDefaultGreeting(settings);
-    } else {
-      return greeting || settings.greeting;
-    }
-  };
-
-  setIframeRef = (el: HTMLIFrameElement) => {
-    this.iframeRef = el;
-  };
-
-  getIframeUrl = () => {
-    return this.props.iframeUrlOverride || DEFAULT_IFRAME_URL;
-  };
-
-  handleConfigUpdated = (updates: WidgetConfig) => {
-    this.setState({
-      config: {
-        ...this.state.config,
-        ...updates,
-      },
-    });
-
-    this.send('config:update', updates);
-  };
-
-  handleSetCustomerId = (id?: any) => {
-    const cachedCustomerId = this.storage.getCustomerId();
-    const customerId = id || cachedCustomerId;
-
-    this.logger.debug('Setting customer ID:', customerId);
-    this.setState({
-      config: {...this.state.config, customerId},
-    });
-    this.send('customer:set:id', customerId);
-  };
-
-  handleCustomerIdUpdated = (id?: any) => {
-    const cachedCustomerId = this.storage.getCustomerId();
-    const customerId = id || cachedCustomerId;
-    const config = {...this.state.config, customerId};
-
-    // TODO: this is a slight hack to force a refresh of the chat window
-    this.setState({
-      config,
-      query: qs.stringify(config, {skipEmptyString: true, skipNull: true}),
-    });
-
-    this.logger.debug('Updated customer ID:', customerId);
-  };
-
-  fetchWidgetSettings = async (): Promise<WidgetSettings> => {
-    const {token, inbox, accountId, baseUrl} = this.props;
-    const params = {account_id: accountId || token, inbox_id: inbox};
-    const empty = {} as WidgetSettings;
-
-    return fetchWidgetSettings(params, baseUrl)
-      .then((settings) => settings || empty)
-      .catch(() => empty);
-  };
-
-  updateWidgetSettingsMetadata = async () => {
-    const {token, inbox, accountId, baseUrl} = this.props;
-    const params = {
-      account_id: accountId || token,
-      inbox_id: inbox,
-      metadata: getUserInfo(window),
-    };
-
-    return updateWidgetSettingsMetadata(params, baseUrl).catch((err) => {
-      // No need to block on this
-      this.logger.error('Failed to update widget metadata:', err);
-    });
-  };
-
-  hasValidPayloadIdentity = (payload: any) => {
-    const ts = payload && payload.ts;
-    const {config = {} as WidgetConfig} = this.state;
-
-    if (!ts) {
-      // If the payload doesn't contain an identifier, let it pass through
-      return true;
-    }
-
-    if (config.ts === ts) {
-      // Pass through, since the payload identifier matches the component ts
-      return true;
-    }
-
-    return false;
-  };
-
-  customEventHandlers = (event: any) => {
-    if (!event || !event.type) {
-      return null;
-    }
-
-    const {type, detail} = event;
-
-    switch (type) {
-      case 'papercups:open':
-        return this.handleOpenWidget();
-      case 'papercups:close':
-        return this.handleCloseWidget();
-      case 'papercups:toggle':
-        return this.handleToggleOpen();
-      case 'papercups:customer:set':
-        return this.handleSetCustomerId(detail);
-      case 'storytime:customer:set':
-        return this.handleCustomerIdUpdated(detail); // TODO: test this!
-      default:
-        return null;
-    }
-  };
-
-  postMessageHandlers = (msg: any) => {
-    this.logger.debug('Handling in parent:', msg.data);
-    const iframeUrl = this.getIframeUrl();
-    const {origin} = new URL(iframeUrl);
-
-    if (msg.origin !== origin) {
-      return null;
-    }
-
-    const {event, payload = {}} = msg.data;
-
-    if (!this.hasValidPayloadIdentity(payload)) {
-      this.logger.warn(
-        'Payload identifer from iframe does not match parent — halting message handlers.'
-      );
-
-      return null;
-    }
-
-    switch (event) {
-      case 'chat:loaded':
-        return this.handleChatLoaded();
-      case 'customer:created':
-      case 'customer:updated':
-        return this.handleCacheCustomerId(payload);
-      case 'conversation:join':
-        return this.sendCustomerUpdate(payload);
-      case 'message:received':
-        return this.handleMessageReceived(payload);
-      case 'message:sent':
-        return this.handleMessageSent(payload);
-      case 'messages:unseen':
-        return this.handleUnseenMessages(payload);
-      case 'messages:seen':
-        return this.handleMessagesSeen();
-      case 'papercups:open':
-      case 'papercups:close':
-        return this.handleToggleOpen();
-      default:
-        return null;
-    }
-  };
-
-  send = (event: string, payload?: any) => {
-    this.logger.debug('Sending from parent:', {event, payload});
-    const el = this.iframeRef as any;
-
-    if (!el) {
-      throw new Error(
-        `Attempted to send event ${event} with payload ${JSON.stringify(
-          payload
-        )} before iframeRef was ready`
-      );
-    }
-
-    el.contentWindow.postMessage({event, payload}, this.getIframeUrl());
-  };
-
-  handleMessageReceived = (message: Message) => {
-    const {onMessageReceived = noop} = this.props;
-    const {user_id: userId, customer_id: customerId} = message;
-    const isFromAgent = !!userId && !customerId;
-
-    // Only invoke callback if message is from agent, because we currently track
-    // `message:received` events to know if a message went through successfully
-    if (isFromAgent) {
-      onMessageReceived && onMessageReceived(message);
-    }
-  };
-
-  handleMessageSent = (message: Message) => {
-    const {onMessageSent = noop} = this.props;
-
-    onMessageSent && onMessageSent(message);
-  };
-
-  handleUnseenMessages = (payload: any) => {
-    this.logger.debug('Handling unseen messages:', payload);
-
-    this.setState({shouldDisplayNotifications: true});
-    this.send('notifications:display', {shouldDisplayNotifications: true});
-  };
-
-  handleMessagesSeen = () => {
-    this.logger.debug('Handling messages seen');
-
-    this.setState({shouldDisplayNotifications: false});
-    this.storage.setPopupSeen(true);
-    this.send('notifications:display', {shouldDisplayNotifications: false});
-  };
-
-  shouldOpenByDefault = (): boolean => {
-    const {
-      defaultIsOpen,
+      metadata,
       isOpenByDefault,
-      persistOpenState,
-      canToggle,
-    } = this.props;
+      debug,
+    });
 
+    return {
+      isValid: result.success,
+      data: result.success ? result.data : null,
+      message: result.success ? null : formatIssues(result.error.issues),
+    };
+  }, [
+    aiEndpoint,
+    debug,
+    isOpenByDefault,
+    metadata,
+    primaryColor,
+    subtitle,
+    tenantId,
+    title,
+  ]);
+
+  const effectiveTenantId =
+    validation.data?.tenantId || tenantId || 'unknown-tenant';
+  const effectiveAiEndpoint = validation.data?.aiEndpoint || aiEndpoint;
+  const effectiveTitle = validation.data?.title ?? title ?? defaultTitle;
+  const effectiveSubtitle =
+    validation.data?.subtitle ?? subtitle ?? defaultSubtitle;
+  const effectivePrimaryColor =
+    validation.data?.primaryColor ?? primaryColor ?? '#1890ff';
+  const effectiveMetadata = validation.data?.metadata ?? metadata ?? {};
+  const effectiveIsOpenByDefault =
+    validation.data?.isOpenByDefault ?? isOpenByDefault;
+  const effectiveDebug = validation.data?.debug ?? debug;
+
+  const loggerRef = React.useRef(new Logger(effectiveDebug));
+  const storage = React.useMemo(
+    () => store(isBrowser ? window : undefined),
+    [isBrowser]
+  );
+  const [isLoaded, setIsLoaded] = React.useState(false);
+  const [sessionId, setSessionId] = React.useState<string>(() => {
+    const existing = storage.getSessionId(effectiveTenantId);
+
+    if (existing) {
+      return existing;
+    }
+
+    const next = generateId();
+
+    storage.setSessionId(effectiveTenantId, next);
+
+    return next;
+  });
+  const [messages, setMessages] = React.useState<ChatMessage[]>(() => {
+    const transcript = storage.getTranscript(effectiveTenantId);
+
+    return Array.isArray(transcript) ? transcript.slice(-MAX_MESSAGES) : [];
+  });
+  const [isSending, setIsSending] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [isOpen, setIsOpen] = React.useState<boolean>(() => {
     if (!canToggle) {
       return true;
     }
 
-    const isOpenFromCache = this.storage.getOpenState();
+    const cached = storage.getOpenState(effectiveTenantId);
 
-    if (persistOpenState) {
-      return isOpenFromCache;
+    if (typeof cached === 'boolean') {
+      return cached;
     }
 
-    return !!(isOpenByDefault || defaultIsOpen);
-  };
+    return !!effectiveIsOpenByDefault;
+  });
+  const endpointStatusRef = React.useRef<EndpointHealth>('unknown');
 
-  handleChatLoaded = () => {
-    this.setState({isLoaded: true});
+  React.useEffect(() => {
+    loggerRef.current.debugModeEnabled = !!effectiveDebug;
+  }, [effectiveDebug]);
 
-    const {config = {} as WidgetConfig} = this.state;
-    const {subscriptionPlan = null} = config;
-    const {popUpInitialMessage, onChatLoaded = noop} = this.props;
+  React.useEffect(() => {
+    if (!validation.isValid && validation.message) {
+      loggerRef.current.warn(
+        'AI Light widget received invalid props. Using safe fallbacks.',
+        validation.message
+      );
+    }
+  }, [validation]);
 
-    if (onChatLoaded && typeof onChatLoaded === 'function') {
-      onChatLoaded({
-        open: this.handleOpenWidget,
-        close: this.handleCloseWidget,
-        identify: this.identify,
+  React.useEffect(() => {
+    setIsLoaded(isBrowser);
+  }, [isBrowser]);
+
+  React.useEffect(() => {
+    const next = storage.getSessionId(effectiveTenantId);
+
+    if (next && next !== sessionId) {
+      setSessionId(next);
+    } else if (!next) {
+      const created = generateId();
+
+      storage.setSessionId(effectiveTenantId, created);
+      setSessionId(created);
+    }
+  }, [effectiveTenantId, sessionId, storage]);
+
+  React.useEffect(() => {
+    const transcript = storage.getTranscript(effectiveTenantId);
+
+    setMessages(Array.isArray(transcript) ? transcript : []);
+  }, [effectiveTenantId, storage]);
+
+  React.useEffect(() => {
+    storage.setOpenState(effectiveTenantId, isOpen);
+  }, [effectiveTenantId, isOpen, storage]);
+
+  React.useEffect(() => {
+    storage.setTranscript(effectiveTenantId, messages);
+  }, [effectiveTenantId, messages, storage]);
+
+  React.useEffect(() => {
+    endpointStatusRef.current = 'unknown';
+  }, [effectiveAiEndpoint]);
+
+  const open = React.useCallback(() => {
+    if (!canToggle) {
+      return;
+    }
+
+    setIsOpen(true);
+  }, [canToggle]);
+
+  const close = React.useCallback(() => {
+    if (!canToggle) {
+      return;
+    }
+
+    setIsOpen(false);
+  }, [canToggle]);
+
+  const toggle = React.useCallback(() => {
+    if (!canToggle) {
+      return;
+    }
+
+    setIsOpen((prev) => !prev);
+  }, [canToggle]);
+
+  const ensureEndpointReachable = React.useCallback(async () => {
+    if (endpointStatusRef.current === 'reachable') {
+      return true;
+    }
+
+    if (endpointStatusRef.current === 'unreachable') {
+      return false;
+    }
+
+    if (!isBrowser || !effectiveAiEndpoint) {
+      return false;
+    }
+
+    let timeoutId: number | undefined;
+
+    try {
+      const controller = new AbortController();
+      timeoutId = window.setTimeout(() => controller.abort(), 3000);
+      const response = await fetch(effectiveAiEndpoint, {
+        method: 'HEAD',
+        signal: controller.signal,
       });
-    }
+      window.clearTimeout(timeoutId);
 
-    if (this.shouldOpenByDefault()) {
-      this.setState({isOpen: true}, () => this.emitToggleEvent(true));
-    }
-
-    if (popUpInitialMessage && !this.storage.getPopupSeen()) {
-      const t =
-        typeof popUpInitialMessage === 'number' ? popUpInitialMessage : 0;
-
-      setTimeout(() => {
-        this.setState({shouldDisplayNotifications: true});
-        this.send('notifications:display', {
-          shouldDisplayNotifications: true,
-          // TODO: this may not be necessary
-          popUpInitialMessage: true,
-        });
-      }, t);
-    }
-
-    this.send('papercups:plan', {plan: subscriptionPlan});
-  };
-
-  formatCustomerMetadata = (customer: CustomerMetadata | null | undefined) => {
-    if (!customer) {
-      return {};
-    }
-
-    return Object.keys(customer).reduce((acc, key) => {
-      if (key === 'metadata') {
-        return {...acc, [key]: customer[key]};
-      } else {
-        // Make sure all other passed-in values are strings
-        return {...acc, [key]: String(customer[key])};
+      const reachable = !!response;
+      endpointStatusRef.current = reachable ? 'reachable' : 'unreachable';
+      if (!reachable) {
+        setError('AI service appears unreachable. Please try again later.');
       }
-    }, {});
-  };
+      return reachable;
+    } catch (err) {
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      endpointStatusRef.current = 'unreachable';
+      setError('AI service appears unreachable. Please try again later.');
+      loggerRef.current.warn('AI endpoint appears unreachable.', err);
+      return false;
+    }
+  }, [effectiveAiEndpoint, isBrowser]);
 
-  identify = (data: CustomerMetadata) => {
-    const {customerId} = this.state.config;
+  React.useEffect(() => {
+    if (!isBrowser) {
+      return;
+    }
 
-    return this.updateCustomerMetadata(customerId, data);
-  };
+    ensureEndpointReachable();
+  }, [ensureEndpointReachable, isBrowser]);
 
-  updateCustomerMetadata = (
-    customerId: string | undefined,
-    data: CustomerMetadata | null | undefined
-  ) => {
-    const customerBrowserInfo = getUserInfo(window);
-    const metadata = {
-      ...customerBrowserInfo,
-      ...this.formatCustomerMetadata(data),
+  React.useEffect(() => {
+    if (!isBrowser) {
+      return;
+    }
+
+    const handleOpen = () => open();
+    const handleClose = () => close();
+    const handleToggle = () => toggle();
+
+    window.addEventListener(OPEN_EVENT, handleOpen);
+    window.addEventListener(CLOSE_EVENT, handleClose);
+    window.addEventListener(TOGGLE_EVENT, handleToggle);
+
+    return () => {
+      window.removeEventListener(OPEN_EVENT, handleOpen);
+      window.removeEventListener(CLOSE_EVENT, handleClose);
+      window.removeEventListener(TOGGLE_EVENT, handleToggle);
     };
+  }, [isBrowser, open, close, toggle]);
 
-    return this.send('customer:update', {customerId, metadata});
-  };
+  const retryWithBackoff = React.useCallback(
+    async <T,>(
+      fn: () => Promise<T>,
+      retries = 2,
+      baseDelayMs = 250,
+      maxDelayMs = 2000
+    ) => {
+      let attempt = 0;
+      let lastError: unknown = null;
 
-  sendCustomerUpdate = (payload: any) => {
-    const {customerId} = payload;
-    const {customer} = this.props;
+      while (attempt <= retries) {
+        try {
+          return await fn();
+        } catch (err) {
+          lastError = err;
+          if (attempt === retries) {
+            break;
+          }
+          const waitMs = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
+          await delay(waitMs);
+        }
+        attempt += 1;
+      }
 
-    this.updateCustomerMetadata(customerId, customer);
-  };
+      throw lastError;
+    },
+    []
+  );
 
-  handleCacheCustomerId = (payload: any) => {
-    const {customerId} = payload;
+  const sendMessage = React.useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
 
-    // Let other modules know that the customer has been set
-    this.logger.debug('Caching customer ID:', customerId);
-    window.dispatchEvent(
-      new CustomEvent('papercups:customer:set', {
-        detail: customerId,
-      })
-    );
+      if (!trimmed) {
+        return;
+      }
 
-    this.storage.setCustomerId(customerId);
-    this.setState({
-      config: {...this.state.config, customerId},
-    });
-  };
+      if (!isBrowser) {
+        loggerRef.current.warn(
+          'Ignoring sendMessage during SSR render; browser APIs unavailable.'
+        );
+        setError('Cannot send messages while rendering on the server.');
+        return;
+      }
 
-  emitToggleEvent = (isOpen: boolean) => {
-    this.send('papercups:toggle', {isOpen});
+      const userMessage: ChatMessage = {
+        id: generateId(),
+        author: 'user',
+        text: trimmed,
+        createdAt: nowAsISOString(),
+      };
 
-    const {
-      persistOpenState = false,
-      onChatOpened = noop,
-      onChatClosed = noop,
-    } = this.props;
+      setMessages((current) => sliceMessages([...current, userMessage]));
+      setIsSending(true);
+      setError(null);
 
-    if (persistOpenState) {
-      this.storage.setOpenState(isOpen);
-    }
+      try {
+        const payload = {
+          sessionId,
+          tenantId: effectiveTenantId,
+          message: trimmed,
+          metadata: effectiveMetadata || {},
+        };
 
-    if (isOpen) {
-      onChatOpened && onChatOpened();
-    } else {
-      onChatClosed && onChatClosed();
-    }
-  };
+        const reachable = await ensureEndpointReachable();
 
-  handleOpenWidget = () => {
-    if (!this.props.canToggle || this.state.isOpen) {
-      return;
-    }
-
-    if (this.state.shouldDisplayNotifications) {
-      this.setState({isTransitioning: true}, () => {
-        setTimeout(() => {
-          this.setState({isOpen: true, isTransitioning: false}, () =>
-            this.emitToggleEvent(true)
+        if (!reachable) {
+          const aiMessage: ChatMessage = {
+            id: generateId(),
+            author: 'ai',
+            text: FALLBACK_REPLY,
+            createdAt: nowAsISOString(),
+          };
+          setMessages((current) => sliceMessages([...current, aiMessage]));
+          setError(
+            'Unable to reach the AI service. Displaying a fallback reply.'
           );
-        }, 200);
-      });
-    } else {
-      this.setState({isOpen: true}, () => this.emitToggleEvent(true));
-    }
-  };
+          return;
+        }
 
-  handleCloseWidget = () => {
-    if (!this.props.canToggle || !this.state.isOpen) {
-      return;
-    }
+        const attemptRequest = async () => {
+          const response = await fetch(effectiveAiEndpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          });
 
-    this.setState({isOpen: false}, () => this.emitToggleEvent(false));
-  };
+          if (!response || !response.ok) {
+            throw new Error(`Request failed: ${response?.status}`);
+          }
 
-  handleToggleOpen = () => {
-    const {isOpen: wasOpen, isLoaded, shouldDisplayNotifications} = this.state;
-    const isOpen = !wasOpen;
+          const data = await response.json();
+          return data?.reply;
+        };
 
-    // Prevent opening the widget until everything has loaded
-    if (!isLoaded || !this.props.canToggle) {
-      return;
-    }
+        const reply = await retryWithBackoff(attemptRequest, 2);
+        const finalReply = reply || FALLBACK_REPLY;
 
-    if (!wasOpen && shouldDisplayNotifications) {
-      this.setState({isTransitioning: true}, () => {
-        setTimeout(() => {
-          this.setState({isOpen, isTransitioning: false}, () =>
-            this.emitToggleEvent(isOpen)
+        const aiMessage: ChatMessage = {
+          id: generateId(),
+          author: 'ai',
+          text: finalReply,
+          createdAt: nowAsISOString(),
+        };
+
+        setMessages((current) => sliceMessages([...current, aiMessage]));
+
+        if (!reply) {
+          setError(
+            'Unable to reach the AI service. Displaying a fallback reply.'
           );
-        }, 200);
-      });
-    } else {
-      this.setState({isOpen}, () => this.emitToggleEvent(isOpen));
-    }
-  };
+        }
+      } catch (err) {
+        loggerRef.current.error('Failed to send message', err);
+        const aiMessage: ChatMessage = {
+          id: generateId(),
+          author: 'ai',
+          text: FALLBACK_REPLY,
+          createdAt: nowAsISOString(),
+        };
+        setMessages((current) => sliceMessages([...current, aiMessage]));
+        setError(
+          'Unable to reach the AI service. Displaying a fallback reply.'
+        );
+      } finally {
+        setIsSending(false);
+      }
+    },
+    [
+      effectiveAiEndpoint,
+      effectiveMetadata,
+      effectiveTenantId,
+      ensureEndpointReachable,
+      isBrowser,
+      retryWithBackoff,
+      sessionId,
+    ]
+  );
 
-  render() {
-    const {
-      isOpen,
-      isLoaded,
-      query,
-      config,
-      shouldDisplayNotifications,
-      isTransitioning,
-    } = this.state;
-    const {
-      customIconUrl,
-      hideOutsideWorkingHours = false,
-      children,
-    } = this.props;
-    const {primaryColor} = config;
+  const clearError = React.useCallback(() => setError(null), []);
+  const theme = React.useMemo(
+    () => getThemeConfig({primary: effectivePrimaryColor}),
+    [effectivePrimaryColor]
+  );
 
-    if (!query) {
-      return null;
-    }
-
-    if (hideOutsideWorkingHours && config.isOutsideWorkingHours) {
-      return null;
-    }
-
-    const iframeUrl = this.getIframeUrl();
-    const isActive = (isOpen || shouldDisplayNotifications) && !isTransitioning;
-    const theme = getThemeConfig({primary: primaryColor});
-    const sandbox = [
-      // Allow scripts to load in iframe
-      'allow-scripts',
-      // Allow opening links from iframe
-      'allow-popups',
-      // Needed to access localStorage
-      'allow-same-origin',
-      // Allow form for message input
-      'allow-forms',
-    ].join(' ');
-
-    return (
-      <ThemeProvider theme={theme}>
-        {children({
-          sandbox,
-          isLoaded,
-          isActive,
-          isOpen,
-          isTransitioning,
-          customIconUrl,
-          iframeUrl,
-          query,
-          shouldDisplayNotifications,
-          setIframeRef: this.setIframeRef,
-          onToggleOpen: this.handleToggleOpen,
-        })}
-      </ThemeProvider>
-    );
+  if (!validation.isValid) {
+    return null;
   }
-}
+
+  return (
+    <ThemeProvider theme={theme}>
+      {children({
+        isOpen: canToggle ? isOpen : true,
+        isLoaded,
+        isSending,
+        messages,
+        error,
+        sessionId,
+        tenantId: effectiveTenantId,
+        title: effectiveTitle,
+        subtitle: effectiveSubtitle,
+        primaryColor: effectivePrimaryColor,
+        metadata: effectiveMetadata,
+        open,
+        close,
+        toggle,
+        sendMessage,
+        clearError,
+      })}
+    </ThemeProvider>
+  );
+};
 
 export default ChatWidgetContainer;

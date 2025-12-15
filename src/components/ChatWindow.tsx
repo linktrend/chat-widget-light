@@ -1,44 +1,59 @@
 /** @jsx jsx */
 
 import {jsx} from 'theme-ui';
-import {motion} from 'framer-motion';
 
-import ChatWidgetContainer, {SharedProps} from './ChatWidgetContainer';
+import ChatWidgetContainer, {LightWidgetProps} from './ChatWidgetContainer';
 import ErrorBoundary from './ErrorBoundary';
+import ChatUI from './ChatUI';
 
-type Props = SharedProps & {};
+const NAMESPACE = 'ai-light';
+
+/* eslint-disable react/no-unknown-property */
+
+type Props = LightWidgetProps & {};
 
 const ChatWindow = (props: Props) => {
-  // TODO: add a prop to `ChatWidgetContainer` to indicate when component is not
-  // the widget (e.g. it is never toggled open/closed, no need to show notifications)
   return (
     <ErrorBoundary>
       <ChatWidgetContainer {...props} canToggle={false}>
         {(config) => {
-          const {sandbox, isLoaded, iframeUrl, query, setIframeRef} = config;
+          const {
+            isLoaded,
+            messages,
+            isSending,
+            error,
+            title,
+            subtitle,
+            primaryColor,
+            sendMessage,
+            clearError,
+          } = config;
 
           return (
-            <motion.iframe
-              ref={setIframeRef}
-              className='Papercups-chatWindowContainer'
-              sandbox={sandbox}
-              animate={isLoaded ? 'open' : 'closed'}
-              initial='closed'
-              variants={{
-                closed: {opacity: 0},
-                open: {opacity: 1},
-              }}
-              transition={{duration: 0.2, ease: 'easeIn'}}
-              src={`${iframeUrl}?${query}`}
+            <div
+              className={`${NAMESPACE}__chat-window-container`}
               sx={{
                 opacity: isLoaded ? 1 : 0,
-                border: 'none',
                 bg: 'background',
                 variant: 'styles.ChatWindowContainer',
+                border: '1px solid',
+                borderColor: 'muted',
+                borderRadius: 8,
+                overflow: 'hidden',
+                isolation: 'isolate',
               }}
             >
-              Loading...
-            </motion.iframe>
+              <ChatUI
+                title={title}
+                subtitle={subtitle}
+                primaryColor={primaryColor}
+                messages={messages}
+                isSending={isSending}
+                error={error}
+                onSend={sendMessage}
+                onClearError={clearError}
+              />
+            </div>
           );
         }}
       </ChatWidgetContainer>

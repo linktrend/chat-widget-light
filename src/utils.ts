@@ -1,32 +1,27 @@
-export type WidgetConfig = {
-  token?: string;
-  inbox?: string;
-  // TODO: deprecate
-  accountId?: string;
-  baseUrl?: string;
-  title?: string;
-  subtitle?: string;
-  primaryColor?: string;
-  greeting?: string;
-  awayMessage?: string;
-  newMessagePlaceholder?: string;
-  emailInputPlaceholder?: string;
-  newMessagesNotificationText?: string;
-  companyName?: string;
-  agentAvailableText?: string;
-  agentUnavailableText?: string;
-  showAgentAvailability?: 1 | 0;
-  requireEmailUpfront?: 1 | 0;
-  disableAnalyticsTracking?: 1 | 0;
-  closeable?: 1 | 0;
-  debug?: 1 | 0;
-  customerId?: string;
-  subscriptionPlan?: string;
-  isBrandingHidden?: boolean;
-  isOutsideWorkingHours?: boolean;
-  metadata?: string; // stringified JSON
-  version?: string;
-  ts?: string;
+export type ChatMessage = {
+  id: string;
+  author: 'user' | 'ai' | 'system';
+  text: string;
+  createdAt: string;
 };
 
 export function noop() {}
+
+export const generateId = () => {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return (crypto as any).randomUUID();
+  }
+
+  // RFC4122-ish fallback
+  const hex = () =>
+    Math.floor((1 + Math.random()) * 0x10000)
+      .toString(16)
+      .substring(1);
+
+  return `${hex()}${hex()}-${hex()}-${hex()}-${hex()}-${hex()}${hex()}${hex()}`;
+};
+
+export const nowAsISOString = () => new Date().toISOString();
+
+export const defaultTitle = 'AI Light';
+export const defaultSubtitle = 'Ask me anything';

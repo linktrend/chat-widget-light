@@ -1,21 +1,30 @@
 import ChatWidget from './components/ChatWidget';
 import ChatWindow from './components/ChatWindow';
+import {
+  CLOSE_EVENT,
+  OPEN_EVENT,
+  TOGGLE_EVENT,
+} from './components/ChatWidgetContainer';
 
-export const open = () => window.dispatchEvent(new Event('papercups:open'));
-export const close = () => window.dispatchEvent(new Event('papercups:close'));
-export const toggle = () => window.dispatchEvent(new Event('papercups:toggle'));
+const dispatchIfBrowser = (eventName: string) => {
+  if (typeof window === 'undefined' || typeof Event === 'undefined') {
+    return;
+  }
 
-export const identify = () => {
-  // TODO: add ability to create/update customer information
-  console.warn('`Papercups.identify` has not been implemented yet!');
+  window.dispatchEvent(new Event(eventName));
 };
 
-export const Papercups = {
+export const open = () => dispatchIfBrowser(OPEN_EVENT);
+export const close = () => dispatchIfBrowser(CLOSE_EVENT);
+export const toggle = () => dispatchIfBrowser(TOGGLE_EVENT);
+
+export const WidgetController = {
   open,
   close,
   toggle,
 };
 
 export {ChatWidget, ChatWindow};
+export type {LightWidgetProps} from './components/ChatWidgetContainer';
 
 export default ChatWidget;

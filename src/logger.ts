@@ -10,7 +10,7 @@ class Logger {
       return;
     }
 
-    console.debug('[Papercups]', ...args);
+    console.debug('[AI Light]', ...args);
   }
 
   log(...args: any) {
@@ -18,19 +18,19 @@ class Logger {
       return;
     }
 
-    console.log('[Papercups]', ...args);
+    console.log('[AI Light]', ...args);
   }
 
   info(...args: any) {
-    console.info('[Papercups]', ...args);
+    console.info('[AI Light]', ...args);
   }
 
   warn(...args: any) {
-    console.warn('[Papercups]', ...args);
+    console.warn('[AI Light]', ...args);
   }
 
   error(...args: any) {
-    console.error('[Papercups]', ...args);
+    console.error('[AI Light]', ...args);
   }
 }
 
